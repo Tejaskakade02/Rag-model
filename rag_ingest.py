@@ -706,11 +706,11 @@ FAISS_PATH = os.path.join(BASE_DIR, "faiss_store.pkl")     # ----- faiss path
 QDRANT_PATH = os.path.join(BASE_DIR, "qdrant_db")       # ----- qdrant path
 QDRANT_COLLECTION = "rag_chunks"                          # ----- qdrant collection name
 MILVUS_COLLECTION = "rag_chunks"                           # ----- milvus collection name
-PINECONE_API_KEY = "pcsk_36kLSk_KyRnADaFcY1xF4dS7gyTKjCqBu5qHj8rYMmmr7RP6anZb56YmGZw1Z5BaM1Gznv"      # pinecone api key
+PINECONE_API_KEY = "your_api_key"      # pinecone api key
 PINECONE_ENV = "us-east-1"                                                                   # ---------------- pinecone environment
 PINECONE_INDEX = "rag-chunks"                                            
-WEAVIATE_URL = "https://pmh8cdktsmeloccbguom5a.c0.asia-southeast1.gcp.weaviate.cloud"                  # ---------------- weaviate url
-WEAVIATE_API_KEY = "UGd4eU0yeC9sbWhNZm53Nl9STDIvSTY0K2puOTRUY05KZ1hNVEhYajhIbk9PTUVMKzluc3RERVI0WC9NPV92MjAw"   # ---------------- weaviate api key
+WEAVIATE_URL = "weaviate_ur"                  # ---------------- weaviate url
+WEAVIATE_API_KEY = "your_api_key"   # ---------------- weaviate api key
 WEAVIATE_CLASS = "RagChunks"
 # ==============================
 # AGENT RULES (CONFIG)
