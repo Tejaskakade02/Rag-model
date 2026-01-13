@@ -8,12 +8,14 @@ import nltk
 import faiss
 import pandas as pd
 import cohere 
+from posthog import page
 import weaviate
+import pytesseract
 
-
+from email.mime import text
+from csv import reader
 from pptx import Presentation
 from PIL import Image
-import pytesseract
 from openpyxl import load_workbook
 from docx import Document
 from weaviate.auth import AuthApiKey
@@ -22,6 +24,7 @@ from weaviate.classes.config import DataType as WeaviateDataType
 from weaviate.classes.data import DataObject
 from sklearn.metrics.pairwise import cosine_similarity
 from pypdf import PdfReader
+from pdf2image import convert_from_path
 from nltk.tokenize import sent_tokenize
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -134,173 +137,184 @@ EMBEDDING_REGISTRY = {
 # Documents loader LOADER
 # ==============================
 
-def load_pdf(pdf_path):
-    reader = PdfReader(pdf_path)
-    documents = []
+# ==============================
+# DOCUMENT LOADER CLASS (UNIFIED)
+# ==============================
 
-    for page_num, page in enumerate(reader.pages):
-        text = page.extract_text()
-        if text and text.strip():
-            documents.append({
+class DocumentLoader:
+    """
+    Unified document loader for RAG ingestion.
+    Returns a list of {text, metadata} dicts.
+    """
+
+    def load(self, file_path: str):
+        ext = os.path.splitext(file_path)[1].lower()
+
+        if ext == ".pdf":
+            return self._load_pdf(file_path)
+
+        elif ext in [".txt", ".text", ".log"]:
+            return self._load_text(file_path)
+
+        elif ext in [".md", ".markdown", ".mdown", ".mkd"]:
+            return self._load_markdown(file_path)
+
+        elif ext in [".docx"]:
+            return self._load_docx(file_path)
+
+        elif ext in [".csv", ".tsv", ".xls", ".xlsx", ".xlsm"]:
+            return self._load_table(file_path)
+
+        elif ext in [".pptx"]:
+            return self._load_pptx(file_path)
+
+        elif ext in [".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"]:
+            return self._load_image(file_path)
+
+        else:
+            raise ValueError(f"Unsupported file type: {ext}")
+
+    # ---------- LOADERS ----------
+
+    def _load_pdf(self, file_path):
+         docs = []
+
+    # 1️⃣ Normal text extraction
+         reader = PdfReader(file_path)
+         for i, page in enumerate(reader.pages):
+             text = page.extract_text()
+             if text and text.strip():
+                 docs.append({
                 "text": text,
                 "metadata": {
-                    "source": os.path.basename(pdf_path),
-                    "page": page_num + 1
+                    "source": os.path.basename(file_path),
+                    "page": i + 1,
+                    "type": "pdf_text"
                 }
-            })
-    return documents
+            })  
+                
+                # 2️⃣ OCR fallback (images & scanned pages)
+         try:
+             images = convert_from_path(file_path)
+             for i, img in enumerate(images):
+                 ocr_text = pytesseract.image_to_string(img)
+                 if ocr_text.strip():
+                     docs.append({
+                    "text": ocr_text,
+                    "metadata": {
+                        "source": os.path.basename(file_path),
+                        "page": i + 1,
+                        "type": "pdf_ocr"
+                    }
+                })
+         except Exception as e:
+            print("⚠ OCR skipped:", e)
 
+         return docs
 
-def load_txt(txt_path):
-    with open(txt_path, "r", encoding="utf-8", errors="ignore") as f:
-        text = f.read()
+    def _load_text(self, file_path):
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
 
-    return [{
-        "text": text,
-        "metadata": {
-            "source": os.path.basename(txt_path),
-            "page": 1
-        }
-    }]
-
-def load_docx(docx_path):
-    doc = Document(docx_path)
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    text = "\n".join(paragraphs)
-
-    return [{
-        "text": text,
-        "metadata": {
-            "source": os.path.basename(docx_path),
-            "page": 1
-        }
-    }]
-
-
-
-
-def extract_excel_hyperlinks(file_path):             # ------------------ extract hyperlinks from Excel files function
-    wb = load_workbook(file_path, data_only=True)
-    links = []
-
-    for sheet in wb.worksheets:
-        for row in sheet.iter_rows():
-            for cell in row:
-                if cell.hyperlink:
-                    links.append(cell.hyperlink.target)
-
-    return list(set(links))
-
-
-
-def load_table(file_path):                  # ------------------ loads Excel files function
-    ext = os.path.splitext(file_path)[1].lower()
-
-    if ext == ".csv":
-        df = pd.read_csv(file_path)
-    elif ext == ".tsv":
-        df = pd.read_csv(file_path, sep="\t")
-    elif ext in [".xls", ".xlsx", ".xlsm"]:
-        df = pd.read_excel(file_path)
-    else:
-        raise ValueError("Unsupported table format")
-
-    df = df.dropna(how="all")  # remove empty rows
-    df = df.fillna("")         # avoid NaN in text
-
-    documents = []
-
-    for idx, row in df.iterrows():
-        row_text = " | ".join(
-            f"{col}: {str(row[col]).strip()}"
-            for col in df.columns
-            if str(row[col]).strip()
-        )
-
-        if not row_text:
-            continue
-
-        documents.append({
-            "text": row_text,
-            "metadata": {
-                "source": os.path.basename(file_path),
-                "row_number": int(idx),
-                "type": "table",
-                "hyperlinks": extract_excel_hyperlinks(file_path)
-            }
-        })
-
-    return documents
-
-
-def load_image(image_path):                                 # ------------------ loads images with OCR function
-    try:
-        image = Image.open(image_path)
-        text = pytesseract.image_to_string(image)
-        if not text.strip():
-            return []
         return [{
             "text": text,
             "metadata": {
-                "source": os.path.basename(image_path),
+                "source": os.path.basename(file_path),
                 "page": 1,
-                "type": "image"
+                "type": "text"
             }
         }]
-    except Exception as e:
-        print(f"⚠ OCR failed for {image_path}: {e}")
-        return []
-    
 
+    def _load_markdown(self, file_path):
+        # Markdown is treated as plain text for RAG
+        return self._load_text(file_path)
 
-def load_pptx(pptx_path):                                    # ------------------ loads PowerPoint files function
-    prs = Presentation(pptx_path)
-    slides_text = []
+    def _load_docx(self, file_path):
+        doc = Document(file_path)
+        text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
-    for i, slide in enumerate(prs.slides):
-        slide_content = []
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                slide_content.append(shape.text)
+        return [{
+            "text": text,
+            "metadata": {
+                "source": os.path.basename(file_path),
+                "page": 1,
+                "type": "docx"
+            }
+        }]
 
-        if slide_content:
-            slides_text.append(
-                f"Slide {i+1}:\n" + "\n".join(slide_content)
+    def _load_table(self, file_path):
+        ext = os.path.splitext(file_path)[1].lower()
+
+        if ext == ".csv":
+            df = pd.read_csv(file_path)
+        elif ext == ".tsv":
+            df = pd.read_csv(file_path, sep="\t")
+        else:
+            df = pd.read_excel(file_path)
+
+        df = df.dropna(how="all").fillna("")
+        docs = []
+
+        for idx, row in df.iterrows():
+            row_text = " | ".join(
+                f"{col}: {str(row[col]).strip()}"
+                for col in df.columns
+                if str(row[col]).strip()
             )
 
-    return [{
-        "text": "\n\n".join(slides_text),
-        "metadata": {
-            "source": os.path.basename(pptx_path),
-            "page": 1,
-            "type": "presentation"
-        }
-    }]
+            if row_text:
+                docs.append({
+                    "text": row_text,
+                    "metadata": {
+                        "source": os.path.basename(file_path),
+                        "row": int(idx),
+                        "type": "table"
+                    }
+                })
 
- 
-def load_document(file_path):                      # ------------------ main document loader function    
-    ext = os.path.splitext(file_path)[1].lower()
+        return docs
 
-    if ext == ".pdf":
-        return load_pdf(file_path)
+    def _load_pptx(self, file_path):
+        prs = Presentation(file_path)
+        docs = []
 
-    elif ext in [".txt", ".text", ".md", ".markdown", ".mdown", ".mkd", ".log"]:
-        return load_txt(file_path)
+        for i, slide in enumerate(prs.slides):
+            slide_text = []
+            for shape in slide.shapes:
+                if hasattr(shape, "text"):
+                    slide_text.append(shape.text)
 
-    elif ext in [".doc", ".docx"]:
-        return load_docx(file_path)
+            if slide_text:
+                docs.append({
+                    "text": "\n".join(slide_text),
+                    "metadata": {
+                        "source": os.path.basename(file_path),
+                        "page": i + 1,
+                        "type": "pptx"
+                    }
+                })
 
-    elif ext in [".csv", ".tsv", ".xls", ".xlsx", ".xlsm"]:
-        return load_table(file_path)
+        return docs
 
-    elif ext in [".ppt", ".pptx"]:
-        return load_pptx(file_path)
+    def _load_image(self, file_path):
+        try:
+            image = Image.open(file_path)
+            text = pytesseract.image_to_string(image)
 
-    elif ext in [".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"]:
-        return load_image(file_path)
+            if not text.strip():
+                return []
 
-    else:
-        raise ValueError(f"Unsupported file type: {ext}")
+            return [{
+                "text": text,
+                "metadata": {
+                    "source": os.path.basename(file_path),
+                    "page": 1,
+                    "type": "image"
+                }
+            }]
+        except Exception as e:
+            print(f"⚠ OCR failed for {file_path}: {e}")
+            return []
 
 
 # ==============================
@@ -907,7 +921,8 @@ def init_vector_store(db_type, embedder, embedding_key):
 # ==============================
 
 def ingest_document(file_path, strategy, collection, embedder, embedding_key):
-    documents = load_document(file_path)
+    loader = DocumentLoader()
+    documents = loader.load(file_path)
     total_chunks = 0
 
     for doc in documents:
@@ -983,8 +998,8 @@ def ingest_document(file_path, strategy, collection, embedder, embedding_key):
 
 if __name__ == "__main__":
 
-    pdf_path = "example data.xlsx"
-    strategy = "sentence"         # fixed | sentence | paragraph | recursive | semantic | agentic | content_aware
+    pdf_path = "set2-MCA-SY-III-DS.docx"
+    strategy = "recursive"         # fixed | sentence | paragraph | recursive | semantic | agentic | content_aware
     vector_db = "qdrant"         # chroma | faiss | qdrant | milvus | pinecone | weaviate
     embedding_key = "bge-base"  # bge-base | bge-m3 | e5-large | e5-multilingual | gte-large | nomic-v1.5 | cohere-english | cohere-multilingual
     print("🧠 Loading embedding model...")
