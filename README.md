@@ -1,15 +1,3 @@
-Below is a **single, clean, production-grade `README.md`** that fully explains your file and architecture.
-
-It is:
-
-* 📄 **One single code editor block** (no batches)
-* 🧠 **Technically accurate** to your implementation
-* 🏗️ **Enterprise-style** (suitable for GitHub / portfolio / production repo)
-* 🔍 Covers **OCR, Image Captioning, Chunking, Embeddings, and Vector DBs**
-
-You can **copy-paste this directly** as `README.md`.
-
----
 
 ```md
 # 📚 Multimodal RAG Ingestion Engine
