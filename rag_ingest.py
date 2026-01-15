@@ -11,8 +11,10 @@ import cohere
 from posthog import page
 import weaviate
 import pytesseract
+import torch
 
-from email.mime import text
+
+from email.mime import image, text
 from csv import reader
 from pptx import Presentation
 from PIL import Image
@@ -33,6 +35,9 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Distance
 from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Collection,utility
 from pinecone import Pinecone, ServerlessSpec
+
+from transformers import BlipProcessor, BlipForConditionalGeneration
+
 
 # ==============================
 # INITIAL SETUP
@@ -57,6 +62,11 @@ WEAVIATE_URL = "https://pmh8cdktsmeloccbguom5a.c0.asia-southeast1.gcp.weaviate.c
 WEAVIATE_API_KEY = "UGd4eU0yeC9sbWhNZm53Nl9STDIvSTY0K2puOTRUY05KZ1hNVEhYajhIbk9PTUVMKzluc3RERVI0WC9NPV92MjAw"   # ---------------- weaviate api key
 WEAVIATE_CLASS = "RagChunks"
 COHERE_API_KEY="BALyrvraWjAJ0273i1sNKyGNs4S2ase0Y8I2ZezG" #------------------- cohere api key
+
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+blip_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(DEVICE)
 
 # ==============================
 # AGENT RULES (CONFIG)
@@ -176,43 +186,67 @@ class DocumentLoader:
 
     # ---------- LOADERS ----------
 
-    def _load_pdf(self, file_path):
-         docs = []
+    def _load_pdf(self, file_path):      #----------------------------PDF LOADER WITH OCR + IMAGE CAPTIONING
+        docs = []
 
+    # ==============================
     # 1️⃣ Normal text extraction
-         reader = PdfReader(file_path)
-         for i, page in enumerate(reader.pages):
-             text = page.extract_text()
-             if text and text.strip():
-                 docs.append({
-                "text": text,
-                "metadata": {
+    # ==============================
+        reader = PdfReader(file_path)
+        for i, page in enumerate(reader.pages):
+            text = page.extract_text()
+            if text and text.strip():
+                docs.append({
+                    "text": text.strip(),
+                    "metadata": {
                     "source": os.path.basename(file_path),
                     "page": i + 1,
-                    "type": "pdf_text"
+                    "type": "pdf_text",
+                    "confidence": "high"
                 }
-            })  
-                
-                # 2️⃣ OCR fallback (images & scanned pages)
-         try:
-             images = convert_from_path(file_path)
-             for i, img in enumerate(images):
-                 ocr_text = pytesseract.image_to_string(img)
-                 if ocr_text.strip():
-                     docs.append({
-                    "text": ocr_text,
+            })
+
+    # ==============================
+    # 2️⃣ OCR + Image Captioning
+    # ==============================
+        try:
+            images = convert_from_path(file_path)
+
+            for i, img in enumerate(images):
+            # ---- OCR ----
+              ocr_text = pytesseract.image_to_string(img)
+              if ocr_text and ocr_text.strip():
+                docs.append({
+                    "text": ocr_text.strip(),
                     "metadata": {
                         "source": os.path.basename(file_path),
                         "page": i + 1,
-                        "type": "pdf_ocr"
+                        "type": "pdf_ocr",
+                        "confidence": "high"
                     }
                 })
-         except Exception as e:
-            print("⚠ OCR skipped:", e)
 
-         return docs
+            # ---- Image captioning ----
+            caption = self.describe_image(img)
+            if caption and len(caption.split()) >= 4:
+                docs.append({
+                    "text": caption,
+                    "metadata": {
+                        "source": os.path.basename(file_path),
+                        "page": i + 1,
+                        "type": "pdf_image_caption",
+                        "confidence": "medium"
+                    }
+                })
 
-    def _load_text(self, file_path):
+        except Exception as e:
+            print("⚠ OCR / Image captioning skipped:", e)
+
+        return docs
+
+#=======================================================================================
+
+    def _load_text(self, file_path):         # ----------------------------TEXT LOADER
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             text = f.read()
 
@@ -224,12 +258,15 @@ class DocumentLoader:
                 "type": "text"
             }
         }]
+#========================================================================================
 
-    def _load_markdown(self, file_path):
+    def _load_markdown(self, file_path):             # ----------------------------MARKDOWN LOADER
         # Markdown is treated as plain text for RAG
         return self._load_text(file_path)
+    
 
-    def _load_docx(self, file_path):
+#========================================================================================
+    def _load_docx(self, file_path):                    # ----------------------------DOCX LOADER
         doc = Document(file_path)
         text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
@@ -273,8 +310,9 @@ class DocumentLoader:
                 })
 
         return docs
+#========================================================================================
 
-    def _load_pptx(self, file_path):
+    def _load_pptx(self, file_path):      # ----------------------------PPTX LOADER
         prs = Presentation(file_path)
         docs = []
 
@@ -295,27 +333,72 @@ class DocumentLoader:
                 })
 
         return docs
+    
+#========================================================================================
+    # ==============================
+    # IMAGE LOADER (OCR + CAPTION)
+    # ==============================
+    def _load_image(self, image_path):                     # ----------------------------IMAGE LOADER WITH OCR + IMAGE CAPTIONING
+        docs = []
 
-    def _load_image(self, file_path):
         try:
-            image = Image.open(file_path)
-            text = pytesseract.image_to_string(image)
-
-            if not text.strip():
-                return []
-
-            return [{
-                "text": text,
-                "metadata": {
-                    "source": os.path.basename(file_path),
-                    "page": 1,
-                    "type": "image"
-                }
-            }]
+            image = Image.open(image_path).convert("RGB")
         except Exception as e:
-            print(f"⚠ OCR failed for {file_path}: {e}")
-            return []
+            print(f"⚠ Failed to open image {image_path}: {e}")
+            return docs
 
+        # 1️⃣ OCR
+        ocr_text = pytesseract.image_to_string(image)
+        if ocr_text.strip():
+            docs.append({
+                "text": ocr_text.strip(),
+                "metadata": {
+                    "source": os.path.basename(image_path),
+                    "page": 1,
+                    "type": "image_ocr",
+                    "confidence": "high"
+                }
+            })
+
+        # 2️⃣ Image captioning
+        caption = self.describe_image(image)
+        if caption and len(caption.split()) >= 4:
+            docs.append({
+                "text": caption,
+                "metadata": {
+                    "source": os.path.basename(image_path),
+                    "page": 1,
+                    "type": "image_caption",
+                    "confidence": "medium"
+                }
+            })
+
+        return docs
+
+    # ==============================
+    # IMAGE CAPTIONING
+    # ==============================
+    def describe_image(self, image: Image.Image) -> str:
+        try:
+            inputs = blip_processor(
+                image,
+                return_tensors="pt"
+            ).to(DEVICE)
+            with torch.no_grad():
+                 output = blip_model.generate(
+                     **inputs,
+                    max_length=60,
+                    num_beams=5
+                )
+
+            caption = blip_processor.decode(
+                output[0],
+                skip_special_tokens=True
+            )
+            return caption.strip()
+        except Exception as e:
+             print("⚠ Image captioning failed:", e)
+        return ""
 
 # ==============================
 # BASIC CHUNKING STRATEGIES
@@ -998,7 +1081,7 @@ def ingest_document(file_path, strategy, collection, embedder, embedding_key):
 
 if __name__ == "__main__":
 
-    pdf_path = "set2-MCA-SY-III-DS.docx"
+    pdf_path = "ai demo.jpg"
     strategy = "recursive"         # fixed | sentence | paragraph | recursive | semantic | agentic | content_aware
     vector_db = "qdrant"         # chroma | faiss | qdrant | milvus | pinecone | weaviate
     embedding_key = "bge-base"  # bge-base | bge-m3 | e5-large | e5-multilingual | gte-large | nomic-v1.5 | cohere-english | cohere-multilingual
